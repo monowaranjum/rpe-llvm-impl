@@ -163,11 +163,11 @@ namespace
 
     static void parseBinaryBranchInstruction(BranchInst *brInst, AugmentedBasicBlock *acfgNode){
         if(brInst->isConditional()){
-        acfgNode->setConditionalBlock();
-        Value *op1 = brInst->getSuccessor(0);                                
-        acfgNode->setTrueBlock(getSimpleNodeLabel(dyn_cast<BasicBlock>(op1)));
-        Value *op2 = brInst->getSuccessor(1);                                
-        acfgNode->setFalseBlock(getSimpleNodeLabel(dyn_cast<BasicBlock>(op2)));
+            acfgNode->setConditionalBlock();
+            Value *op1 = brInst->getSuccessor(0);                                
+            acfgNode->setTrueBlock(getSimpleNodeLabel(dyn_cast<BasicBlock>(op1)));
+            Value *op2 = brInst->getSuccessor(1);                                
+            acfgNode->setFalseBlock(getSimpleNodeLabel(dyn_cast<BasicBlock>(op2)));
         }
         else if(brInst->isUnconditional()){
             Value *op = brInst->getSuccessor(0);
@@ -176,7 +176,7 @@ namespace
     }
 
     static void parseSwitchInstruction(SwitchInst *switch_inst){
-
+        // [TODO]
     }
 
     
