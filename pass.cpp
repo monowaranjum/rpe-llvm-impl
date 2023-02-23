@@ -1,6 +1,7 @@
 #include <iostream>
 #include <vector>
 #include <map>
+#include <stack>
 #include <list>
 #include <utility>
 #include <string>
@@ -22,6 +23,9 @@ using namespace std;
 
 namespace
 {
+    vector< string > loopingBlocks;    
+    map< string,int > visited;
+    enum State {WHITE, GRAY, BLACK};
 
     class AugmentedBasicBlock
     {
@@ -219,6 +223,55 @@ namespace
         }
     }
 
+    static bool dfsUtil(map<string, vector<string>> adjList, string node){
+        // errs()<<"Called with node: "<<node<<"\n";
+        visited[node] = GRAY;
+        vector<string> children = adjList[node];
+        bool res = false;
+        for(string child: children){
+            if(visited[child] == GRAY){
+                // errs()<<"Loop detected\n";
+                loopingBlocks.push_back(child);
+                res = true;
+            }
+            if(visited[child] == WHITE && dfsUtil(adjList, child)){
+                res = true;
+            }
+        }
+        visited[node] = BLACK;
+        return res;
+    }
+
+    static pair<bool,vector<string>> containsLoop(map<string, vector<string>> adjList, string root){
+
+        loopingBlocks.clear();
+        visited.clear();
+
+        bool hasLoop = false;
+        for(auto key:adjList){
+            visited[key.first] = WHITE;
+        }
+
+        hasLoop = dfsUtil(adjList, root);        
+
+        return make_pair(hasLoop, loopingBlocks);
+    }
+
+    static void traverse(map<string, vector<string>> adjList, string root){
+
+    }
+
+    static void printAdjacencyList(map<string, vector<string>> adjacencyList){
+        errs()<<"Adjacency List Is:\n";
+        for(auto key: adjacencyList){
+            errs() << key.first <<" -> ";
+            for(auto elem: key.second){
+                errs()<<elem<<", ";
+            }
+            errs()<<"\n";
+        }
+    }
+
     static vector<list<string>> extractPaths(vector<pair<string, string>> eList, string rootId)
     {
         vector<list<string>> paths;
@@ -229,16 +282,30 @@ namespace
                 vector<string> children;
                 children.push_back(temp.second);
                 adjacencyList[temp.first] = children;
+                if(adjacencyList.find(temp.second) == adjacencyList.end()){
+                    vector<string> emptyVector;
+                    adjacencyList[temp.second] = emptyVector;
+                }
             }
             else{
                 vector<string> currChildren = adjacencyList[temp.first];
                 currChildren.push_back(temp.second);
                 adjacencyList[temp.first] = currChildren;
+                if(adjacencyList.find(temp.second) == adjacencyList.end()){
+                    vector<string> emptyVector;
+                    adjacencyList[temp.second] = emptyVector;
+                }
             }
         }
         // Traverse the graph by DFS
 
-
+        printAdjacencyList(adjacencyList);
+        
+        pair<bool, vector<string> > loopAnalysis = containsLoop(adjacencyList, rootId);
+        errs()<<loopAnalysis.first<<"\n";
+        for(auto elem: loopAnalysis.second){
+            errs()<< elem << "\n";
+        }
         // Traversal ends
         return paths;
     }
@@ -255,8 +322,8 @@ namespace
                 const Function &currentFunction = *functionIt;
                 errs() << "Current Function: " << currentFunction.getName() << "\n";
                 map<string, AugmentedBasicBlock> idAcfgNode;
-                vector<pair<string, string>> edgeList;
-
+                vector< pair<string, string> > edgeList;
+                string rootBlockId;
                 if (currentFunction.getBasicBlockList().size() == 0)
                 {
                     continue;
@@ -307,6 +374,7 @@ namespace
                     else
                     {
                         rootBlock = const_cast<BasicBlock *>(&basicBlock);
+                        rootBlockId = getSimpleNodeLabel(rootBlock);
                         isRootBlock = true;
                         acfgNode.setRootBlock();
                     }
@@ -338,7 +406,8 @@ namespace
 
                     idAcfgNode[acfgNode.getBlockId()] = acfgNode;
                 }
-                printEdgeList(edgeList);
+                // printEdgeList(edgeList);
+                extractPaths(edgeList, rootBlockId);
             }
             return false;
         }
