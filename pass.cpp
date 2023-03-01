@@ -1,10 +1,12 @@
-#include <iostream>
+// STL dependencies
+#include <algorithm>
 #include <vector>
 #include <map>
 #include <stack>
 #include <list>
 #include <utility>
 #include <string>
+// LLVM dependencies
 #include "llvm/Pass.h"
 #include "llvm/IR/Function.h"
 #include "llvm/Support/raw_ostream.h"
@@ -16,6 +18,7 @@
 #include "llvm/IR/InstrTypes.h"
 #include "llvm/IR/AbstractCallSite.h"
 #include "llvm/IR/Instructions.h"
+// JSON dependencies
 #include <jsoncpp/json/json.h>
 
 using namespace llvm;
@@ -23,22 +26,29 @@ using namespace std;
 
 namespace
 {
-    vector< string > loopingBlocks;    
-    map< string,int > visited;
-    enum State {WHITE, GRAY, BLACK};
+    vector<string> loopingBlocks;
+    map<string, int> visited;
+    vector<list<string>> paths;
+
+    enum State
+    {
+        WHITE,
+        GRAY,
+        BLACK
+    };
 
     class AugmentedBasicBlock
     {
     private:
-        string blockId;                   // Unique Block Id
-        bool isRootBlock;                      // Defines if this is the starting block of the function.
-        bool isConditionalBlock;               // Does it have branching at the end or just a straight jump to next block
-        bool hasInlineAssembly;                // Is there any inline assembly instruction? Then parse separately
-        string trueBlock;                 // If branched, then next true block
-        string falseBlock;                // If branched, then next false block
-        string nextBlock;                 // If not branched, then next block
+        string blockId;              // Unique Block Id
+        bool isRootBlock;            // Defines if this is the starting block of the function.
+        bool isConditionalBlock;     // Does it have branching at the end or just a straight jump to next block
+        bool hasInlineAssembly;      // Is there any inline assembly instruction? Then parse separately
+        string trueBlock;            // If branched, then next true block
+        string falseBlock;           // If branched, then next false block
+        string nextBlock;            // If not branched, then next block
         vector<string> instructions; // All the call instructions are stored here (operation and arguments)
-        vector<StringRef> functions;      // All the functions are stored here (Name only)
+        vector<StringRef> functions; // All the functions are stored here (Name only)
         vector<string> parents;      // Can keep track of the parent blocks if implementation wants
     public:
         AugmentedBasicBlock()
@@ -133,7 +143,7 @@ namespace
     };
 
     static string getSimpleNodeLabel(const BasicBlock &Node)
-    { // Copied from Github
+    { // Copied from Stack Overflow
         if (!Node.getName().empty())
             return Node.getName().str();
 
@@ -147,8 +157,9 @@ namespace
     static string getSimpleNodeLabel(const BasicBlock *Node)
     { // Pointer Version
         if (!Node->getName().empty())
+        {
             return Node->getName().str();
-
+        }
         string Str;
         raw_string_ostream OS(Str);
 
@@ -223,18 +234,22 @@ namespace
         }
     }
 
-    static bool dfsUtil(map<string, vector<string>> adjList, string node){
+    static bool loopDfsUtil(map<string, vector<string>> adjList, string node)
+    {
         // errs()<<"Called with node: "<<node<<"\n";
         visited[node] = GRAY;
         vector<string> children = adjList[node];
         bool res = false;
-        for(string child: children){
-            if(visited[child] == GRAY){
+        for (string child : children)
+        {
+            if (visited[child] == GRAY)
+            {
                 // errs()<<"Loop detected\n";
                 loopingBlocks.push_back(child);
                 res = true;
             }
-            if(visited[child] == WHITE && dfsUtil(adjList, child)){
+            if (visited[child] == WHITE && loopDfsUtil(adjList, child))
+            {
                 res = true;
             }
         }
@@ -242,72 +257,215 @@ namespace
         return res;
     }
 
-    static pair<bool,vector<string>> containsLoop(map<string, vector<string>> adjList, string root){
+    static pair<bool, vector<string>> containsLoop(map<string, vector<string>> adjList, string root)
+    {
 
         loopingBlocks.clear();
         visited.clear();
 
         bool hasLoop = false;
-        for(auto key:adjList){
+        for (auto key : adjList)
+        {
             visited[key.first] = WHITE;
         }
 
-        hasLoop = dfsUtil(adjList, root);        
+        hasLoop = loopDfsUtil(adjList, root);
 
         return make_pair(hasLoop, loopingBlocks);
     }
 
-    static void traverse(map<string, vector<string>> adjList, string root){
-
-    }
-
-    static void printAdjacencyList(map<string, vector<string>> adjacencyList){
-        errs()<<"Adjacency List Is:\n";
-        for(auto key: adjacencyList){
-            errs() << key.first <<" -> ";
-            for(auto elem: key.second){
-                errs()<<elem<<", ";
+    static void monolithicTraverse(map<string, vector<string>> adjList, string node, list<string> currentPath)
+    {
+        currentPath.push_back(node);
+        vector<string> children = adjList[node];
+        if (children.empty())
+        {
+            // This is a leaf node.
+            paths.push_back(currentPath);
+        }
+        else
+        {
+            for (string child : children)
+            {
+                list<string> currPathClone(currentPath);
+                monolithicTraverse(adjList, child, currPathClone);
             }
-            errs()<<"\n";
         }
     }
 
-    static vector<list<string>> extractPaths(vector<pair<string, string>> eList, string rootId)
+    static void loopAwareTraverse(map<string, vector<string>> adjList, map<string, AugmentedBasicBlock> acfgNodes, string node, list<string> currentPath)
     {
-        vector<list<string>> paths;
-        map<string, vector<string>> adjacencyList; 
-        for( auto it = begin(eList); it != end(eList); ++it ){
+        // If loop exists we have to handle it differently
+        errs() << "Loop aware traversal called for node: " << node << "\n";
+        currentPath.push_back(node);
+        AugmentedBasicBlock acfgNode = acfgNodes[node];
+        if (acfgNode.getConditionalBlock())
+        { // Find if this is a conditional block.
+            if (!loopingBlocks.empty() && find(loopingBlocks.begin(), loopingBlocks.end(), node) != loopingBlocks.end())
+            {
+                // We are at a node that contains a looping block.
+                // Isolating the true block and going to the false block only.
+                errs() << "Found a looping block: " << node << "\n";
+                string trueNode = acfgNode.getTrueBlock();
+                string falseNode = acfgNode.getFalseBlock();
+                // Clone the current path and call on the false node only.
+                list<string> currentPathClone(currentPath);
+                loopAwareTraverse(adjList, acfgNodes, falseNode, currentPathClone);
+            }
+            else
+            {
+                // We are at a node thats a branched node, but no loops
+                vector<string> children = adjList[node];
+                if (children.empty())
+                {
+                    paths.push_back(currentPath);
+                }
+                else
+                {
+                    for (string child : children)
+                    {
+                        list<string> currentPathClone(currentPath);
+                        loopAwareTraverse(adjList, acfgNodes, child, currentPathClone);
+                    }
+                }
+            }
+        }
+        else
+        {
+            // Not a conditional block. Straight to next children block
+            vector<string> children = adjList[node];
+            if (children.empty())
+            {
+                paths.push_back(currentPath);
+            }
+            else
+            {
+                for (string child : children)
+                {
+                    list<string> currentPathClone(currentPath);
+                    loopAwareTraverse(adjList, acfgNodes, child, currentPathClone);
+                }
+            }
+        }
+    }
+
+    static void printAdjacencyList(map<string, vector<string>> adjacencyList)
+    {
+        errs() << "Adjacency List Is:\n";
+        for (auto key : adjacencyList)
+        {
+            errs() << key.first << " -> ";
+            for (auto elem : key.second)
+            {
+                errs() << elem << ", ";
+            }
+            errs() << "\n";
+        }
+    }
+
+    static void printPaths()
+    {
+        int pathNum = 0;
+        for (list<string> path : paths)
+        {
+            errs() << "Path Number: " << ++pathNum << "\nSTART -> ";
+            for (string node : path)
+            {
+                errs() << node << " -> ";
+            }
+            errs() << "END\n";
+        }
+    }
+
+    static void printFunctionalPaths(map<string, AugmentedBasicBlock> acfgNodes)
+    {
+        int count = 0;
+        for (list<string> path : paths)
+        {
+            errs() << "Path Number : " << ++count << "\n\n";
+            // Get each block id and access the function vector from the acfgNodesMap
+            for (string node : path)
+            {
+                if (node != "START" && node != "END")
+                {
+                    errs() << "Functions in Block : " << node << "\n";
+                    AugmentedBasicBlock abb = acfgNodes[node];
+                    vector<StringRef> functionsInThisBlock = abb.getFunctions();
+                    for (StringRef func : functionsInThisBlock)
+                    {
+                        errs() << func << "    ";
+                    }
+                    errs() << "\n";
+                }
+            }
+        }
+    }
+
+    static map<string, vector<string>> buildAdjacencyList(vector<pair<string, string>> eList, map<string, AugmentedBasicBlock> acfgNodes, bool debug = false)
+    {
+        map<string, vector<string>> adjacencyList;
+
+        for (auto it = begin(eList); it != end(eList); ++it)
+        {
             pair<string, string> temp = *it;
-            if(adjacencyList.find(temp.first) == adjacencyList.end() ){
+            if (adjacencyList.find(temp.first) == adjacencyList.end())
+            {
                 vector<string> children;
                 children.push_back(temp.second);
                 adjacencyList[temp.first] = children;
-                if(adjacencyList.find(temp.second) == adjacencyList.end()){
+                if (adjacencyList.find(temp.second) == adjacencyList.end())
+                {
                     vector<string> emptyVector;
                     adjacencyList[temp.second] = emptyVector;
                 }
             }
-            else{
+            else
+            {
                 vector<string> currChildren = adjacencyList[temp.first];
                 currChildren.push_back(temp.second);
                 adjacencyList[temp.first] = currChildren;
-                if(adjacencyList.find(temp.second) == adjacencyList.end()){
+                if (adjacencyList.find(temp.second) == adjacencyList.end())
+                {
                     vector<string> emptyVector;
                     adjacencyList[temp.second] = emptyVector;
                 }
             }
         }
-        // Traverse the graph by DFS
 
-        printAdjacencyList(adjacencyList);
-        
-        pair<bool, vector<string> > loopAnalysis = containsLoop(adjacencyList, rootId);
-        errs()<<loopAnalysis.first<<"\n";
-        for(auto elem: loopAnalysis.second){
-            errs()<< elem << "\n";
+        if (debug)
+        {
+            printAdjacencyList(adjacencyList);
         }
-        // Traversal ends
-        return paths;
+        return adjacencyList;
+    }
+
+    static void extractPaths(vector<pair<string, string>> eList, map<string, AugmentedBasicBlock> acfgNodes, string rootId)
+    {
+        map<string, vector<string>> adjList = buildAdjacencyList(eList, acfgNodes, true);
+        pair<bool, vector<string>> loopAnalysis = containsLoop(adjList, rootId);
+        if (!loopAnalysis.first)
+        {
+            errs() << "No Loop Found. Initiating monolithic traversal.\n";
+            paths.clear();
+            list<string> initialEmptyPath;
+            monolithicTraverse(adjList, rootId, initialEmptyPath);
+        }
+        else
+        {
+            errs() << "Loop found. Initiating loop aware traversal.\n";
+            errs() << "Looping blocks are: ";
+            for (auto elem : loopingBlocks)
+            {
+                errs() << elem << " ";
+            }
+            errs() << "\n";
+            paths.clear();
+            list<string> initialEmptyPath;
+            loopAwareTraverse(adjList, acfgNodes, rootId, initialEmptyPath);
+        }
+        printPaths();
+        errs() << "\n";
+        printFunctionalPaths(acfgNodes);
     }
 
     struct BasicBlockExtractionPass : public ModulePass
@@ -322,8 +480,9 @@ namespace
                 const Function &currentFunction = *functionIt;
                 errs() << "Current Function: " << currentFunction.getName() << "\n";
                 map<string, AugmentedBasicBlock> idAcfgNode;
-                vector< pair<string, string> > edgeList;
+                vector<pair<string, string>> edgeList;
                 string rootBlockId;
+
                 if (currentFunction.getBasicBlockList().size() == 0)
                 {
                     continue;
@@ -394,8 +553,8 @@ namespace
                         }
                         else if (isa<BranchInst>(instruction))
                         {
-                            Instruction *inst = const_cast<Instruction *>(&instruction); // casting shenanigans
-                            BranchInst *brInst = dyn_cast<BranchInst>(inst);             // Oh God, why ?????
+                            Instruction *inst = const_cast<Instruction *>(&instruction);
+                            BranchInst *brInst = dyn_cast<BranchInst>(inst);
                             parseBinaryBranchInstruction(brInst, &acfgNode);
                         }
                         else if (isa<SwitchInst>(instruction))
@@ -407,7 +566,7 @@ namespace
                     idAcfgNode[acfgNode.getBlockId()] = acfgNode;
                 }
                 // printEdgeList(edgeList);
-                extractPaths(edgeList, rootBlockId);
+                extractPaths(edgeList, idAcfgNode, rootBlockId);
             }
             return false;
         }
