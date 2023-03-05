@@ -6,6 +6,8 @@
 #include <list>
 #include <utility>
 #include <string>
+#include <regex>
+#include <iterator>
 // LLVM dependencies
 #include "llvm/Pass.h"
 #include "llvm/IR/Function.h"
@@ -18,8 +20,17 @@
 #include "llvm/IR/InstrTypes.h"
 #include "llvm/IR/AbstractCallSite.h"
 #include "llvm/IR/Instructions.h"
+#include "llvm/Analysis/DDG.h"
+#include "llvm/Analysis/DDGPrinter.h"
+
 // JSON dependencies
 #include <jsoncpp/json/json.h>
+
+// GraphViz dependencies
+#include <graphviz/gvc.h>
+
+// Boost dependencies
+#include <boost/algorithm/string.hpp>
 
 using namespace llvm;
 using namespace std;
@@ -29,6 +40,9 @@ namespace
     vector<string> loopingBlocks;
     map<string, int> visited;
     vector<list<string>> paths;
+
+    map<string, string> typeMap;
+    map<string, vector<string>> adjListForDDG;
 
     enum State
     {
@@ -167,6 +181,14 @@ namespace
         return OS.str();
     }
 
+    static string getTypeFromAddress(Type *type)
+    {
+        string s;
+        raw_string_ostream OS(s);
+        type->print(OS, false);
+        return OS.str();
+    }
+
     static string getInstructionString(Instruction *inst)
     {
         string s;
@@ -175,27 +197,119 @@ namespace
         return ss.str();
     }
 
+    static void parseInlineAssemblyString(string instructionString, CallInst *call)
+    {
+
+        errs() << "\n\n";
+        regex pattern("\"([^\"]*)\"");
+        sregex_iterator start(instructionString.begin(), instructionString.end(), pattern);
+        sregex_iterator end;
+        for (sregex_iterator current = start; current != end; ++current)
+        {
+            smatch match = *current;
+            errs() << match.str() << "\n";
+        }
+        errs() << "Parsing complete.\n";
+
+        assert(call != NULL);
+        int numOperands = call->getNumOperands();
+        for (int i = 0; i < numOperands - 1; i++)
+        {
+            Value *operand = call->getArgOperand(i);
+            operand->print(errs(), false);
+            errs() << "\n";
+        }
+    }
+
+    static string getLeftHandSide(Instruction *inst)
+    {
+        string Str;
+        raw_string_ostream OS(Str);
+
+        inst->print(OS, false);
+        string instString = OS.str();
+        size_t foundAt = instString.find('=');
+        string returnValue;
+        if (foundAt != string::npos)
+        {
+            returnValue = instString.substr(0, foundAt);
+            boost::trim(returnValue);
+        }
+        return returnValue;
+    }
+
+    static string getRightHandSide(Instruction *inst)
+    {
+        string Str;
+        raw_string_ostream OS(Str);
+
+        inst->print(OS, false);
+        string instString = OS.str();
+        size_t foundAt = instString.find('=');
+        string returnValue;
+        int len = instString.length();
+        if (foundAt != string::npos)
+        {
+            returnValue = instString.substr(foundAt + 1);
+            boost::trim(returnValue);
+        }
+        return returnValue;
+    }
+
+    static void parseInstructionForDDG(Instruction &inst)
+    {
+        if (isa<AllocaInst>(inst))
+        {
+            string allocationLocation = getLeftHandSide(&inst);
+            AllocaInst *allocInst = dyn_cast<AllocaInst>(&inst);
+            string typeInfo = getTypeFromAddress(allocInst->getAllocatedType());
+            typeMap[allocationLocation] = typeInfo;
+        }
+        else if (isa<StoreInst>(inst))
+        {
+        }
+        else if (isa<LoadInst>(inst))
+        {
+        }
+        else if (isa<CallInst>(inst))
+        {
+        }
+        else if (isa<GetElementPtrInst>(inst))
+        {
+        }
+        else
+        {
+            // [TODO: Add more instruction type + Analyze which ones are needed for our use case.]
+        }
+    }
+
     static void parseCallInstruction(CallInst *call, Instruction *inst, AugmentedBasicBlock *currBlock)
     {
-        // assert(call != NULL);
-        // int numOperands = call->getNumOperands();
-        // for(int i=0;i<numOperands-1;i++){
-        //     Value *operand = call->getArgOperand(i);
-        //     operand->print(errs(), false);
-        //     errs()<<"\n";
-        // }
         if (call->isInlineAsm())
         {
+            parseInlineAssemblyString(getInstructionString(inst), call);
             currBlock->setInlineAssembly();
             currBlock->addInstruction(getInstructionString(inst));
         }
         else
         {
+
             currBlock->addInstruction(getInstructionString(inst));
             Function *function = call->getCalledFunction();
             if (function != NULL)
             {
                 currBlock->addFunction(function->getName());
+                errs() << "Current Function: " << function->getName() << "\n";
+
+                int numOperands = call->getNumOperands();
+                errs() << "Number of operands: " << numOperands << "\n";
+                for (int i = 0; i < numOperands - 1; i++)
+                {
+                    Value *operand = call->getArgOperand(i);
+                    operand->print(errs(), false);
+                    errs() << "\nOperand Type is: " << getTypeFromAddress(operand->getType()) << "\n";
+                }
+                errs() << "Returns to: " << getLeftHandSide(inst) << "\n";
             }
             else
             {
@@ -487,6 +601,7 @@ namespace
                 {
                     continue;
                 }
+
                 currentFunction.viewCFG();
                 for (auto &basicBlock : currentFunction)
                 {
@@ -545,17 +660,20 @@ namespace
 
                     for (auto &instruction : basicBlock)
                     {
+                        instruction.print(errs(), false);
+                        errs() << "\n";
+
                         if (isa<CallInst>(instruction))
                         {
                             Instruction *inst = const_cast<Instruction *>(&instruction);
                             CallInst *call = dyn_cast<CallInst>(inst);
-                            parseCallInstruction(call, inst, &acfgNode);
+                            // parseCallInstruction(call, inst, &acfgNode);
                         }
                         else if (isa<BranchInst>(instruction))
                         {
                             Instruction *inst = const_cast<Instruction *>(&instruction);
                             BranchInst *brInst = dyn_cast<BranchInst>(inst);
-                            parseBinaryBranchInstruction(brInst, &acfgNode);
+                            // parseBinaryBranchInstruction(brInst, &acfgNode);
                         }
                         else if (isa<SwitchInst>(instruction))
                         {
@@ -566,7 +684,7 @@ namespace
                     idAcfgNode[acfgNode.getBlockId()] = acfgNode;
                 }
                 // printEdgeList(edgeList);
-                extractPaths(edgeList, idAcfgNode, rootBlockId);
+                // extractPaths(edgeList, idAcfgNode, rootBlockId);
             }
             return false;
         }
