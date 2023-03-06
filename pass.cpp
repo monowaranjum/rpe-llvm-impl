@@ -8,6 +8,8 @@
 #include <string>
 #include <regex>
 #include <iterator>
+#include <set>
+
 // LLVM dependencies
 #include "llvm/Pass.h"
 #include "llvm/IR/Function.h"
@@ -49,7 +51,7 @@ namespace
 
     map<string, pair<string, int> > relevantFunctions;
 
-    map<string, vector<ProvenanceNode *>> provenanceAdjList;
+    
 
     enum State
     {
@@ -176,6 +178,7 @@ namespace
         }
     };
 
+    map<string, vector<ProvenanceNode *>> provenanceAdjList;
 
     static string getSimpleNodeLabel(const BasicBlock &Node)
     { // Copied from Stack Overflow
@@ -749,9 +752,31 @@ namespace
         return ret;        
     }
 
-    static void printFunctionalPaths(map<string, AugmentedBasicBlock> acfgNodes)
+    static void printProvenanceEdges(){
+        vector<ProvenanceNode *> adjList = provenanceAdjList["process_name"];
+        for(ProvenanceNode *node : adjList){
+            errs()<<node->action<<" "<<node->artifact<<" "<<node->id<<"\n";
+        }
+    }
+
+    static void dumpProvenanceEdges(string fileName){
+        error_code ec;
+        raw_fd_ostream output(fileName, ec);
+
+        vector<ProvenanceNode *> adjList = provenanceAdjList["process_name"];
+        for(ProvenanceNode *elem: adjList){
+            output<<elem->action<<","<<elem->artifact<<","<<elem->id<<"\n";
+        }
+        output.close();
+    }
+
+    static void generateProvenanceEdges(map<string, AugmentedBasicBlock> acfgNodes)
     {
         loadRelevantFunction();
+        vector<ProvenanceNode *> edges;
+        ProvenanceNode start("load", "FILE", "process_name_start");
+        edges.push_back(&start);
+        provenanceAdjList["process_name"] = edges;
         int count = 0;
         for (list<string> path : paths)
         {
@@ -769,17 +794,51 @@ namespace
                         CallInst *call = dyn_cast<CallInst>(inst);
                         string funcName = call->getCalledFunction()->getName().str();
                         if(relevantFunctions.find(funcName) != relevantFunctions.end()){
-                            Value *val = dyn_cast<Value>(inst);
-
+                            
+                            pair<string, int> relevantInfo = relevantFunctions[funcName];
+                            if(relevantInfo.second == -1){
+                                Value *val = dyn_cast<Value>(inst);
+                                string id = getStringRepresentationOfValue(val);
+                                ProvenanceNode *node1 = new ProvenanceNode(funcName, relevantInfo.first, id);
+                                provenanceAdjList["process_name"].push_back(node1);
+                            }
+                            else{
+                                Value *val = call->getArgOperand(relevantInfo.second);
+                                string id = getStringRepresentationOfValue(val);
+                                ProvenanceNode *node1 = new ProvenanceNode(funcName, relevantInfo.first, id);
+                                provenanceAdjList["process_name"].push_back(node1);
+                            }                            
                         }
                         else{
                             errs()<<"Function "<<funcName<<" Is not relevant.\n";
                         }
                     }
-                    errs() << "\n";
                 }
             }
-            break;
+            ProvenanceNode *exitNode = new ProvenanceNode("exit","PROCESS","process_name_exit");
+            provenanceAdjList["process_name"].push_back(exitNode);
+
+            set<string> uniqueObjects;
+            uniqueObjects.insert("process_name");
+            vector<ProvenanceNode *> adjList = provenanceAdjList["process_name"];
+            for(ProvenanceNode *elem: adjList){
+                string currId = elem->id;
+                bool result = false;
+                for(string uObj:uniqueObjects){
+                    result |= checkLoadStoreSequenceBetweenNodesinDDG(uObj, currId);
+                    if(result){
+                        elem->id = uObj;
+                        break;
+                    }
+                }
+                if(!result){
+                    uniqueObjects.insert(currId);
+                }
+            }
+
+            printProvenanceEdges();
+            dumpProvenanceEdges("prov_edges.txt");
+            break; // This is temporary. 
         }
     }
 
@@ -847,7 +906,7 @@ namespace
         }
         printPaths();
         errs() << "\n";
-        printFunctionalPaths(acfgNodes);
+        generateProvenanceEdges(acfgNodes);
     }
 
     struct BasicBlockExtractionPass : public ModulePass
