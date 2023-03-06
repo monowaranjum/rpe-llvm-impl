@@ -22,6 +22,7 @@
 #include "llvm/IR/Instructions.h"
 #include "llvm/Analysis/DDG.h"
 #include "llvm/Analysis/DDGPrinter.h"
+#include "llvm/IR/Constants.h"
 
 // JSON dependencies
 #include <jsoncpp/json/json.h>
@@ -181,6 +182,14 @@ namespace
         return OS.str();
     }
 
+    static string getStringRepresentationOfValue(Value *value)
+    {
+        string s;
+        raw_string_ostream OS(s);
+        value->printAsOperand(OS, false);
+        return OS.str();
+    }
+
     static string getTypeFromAddress(Type *type)
     {
         string s;
@@ -200,29 +209,30 @@ namespace
     static void parseInlineAssemblyString(string instructionString, CallInst *call)
     {
 
-        errs() << "\n\n";
+        // errs() << "\n\n";
         regex pattern("\"([^\"]*)\"");
         sregex_iterator start(instructionString.begin(), instructionString.end(), pattern);
         sregex_iterator end;
         for (sregex_iterator current = start; current != end; ++current)
         {
             smatch match = *current;
-            errs() << match.str() << "\n";
+            // errs() << match.str() << "\n";
         }
-        errs() << "Parsing complete.\n";
+        // errs() << "Parsing complete.\n";
 
         assert(call != NULL);
         int numOperands = call->getNumOperands();
         for (int i = 0; i < numOperands - 1; i++)
         {
             Value *operand = call->getArgOperand(i);
-            operand->print(errs(), false);
-            errs() << "\n";
+            // operand->print(errs(), false);
+            // errs() << "\n";
         }
     }
 
     static string getLeftHandSide(Instruction *inst)
     {
+        // Untested Functionality
         string Str;
         raw_string_ostream OS(Str);
 
@@ -267,19 +277,130 @@ namespace
         }
         else if (isa<StoreInst>(inst))
         {
+            StoreInst *storeInst = dyn_cast<StoreInst>(&inst);
+
+            Value *storingElement = storeInst->getOperand(0);
+            string storingElementName = getStringRepresentationOfValue(storingElement);
+            string storingElementType = getTypeFromAddress(storingElement->getType());
+
+            Value *storeLocation = storeInst->getPointerOperand();
+            string storeLocationName = getStringRepresentationOfValue(storeLocation);
+            string storeLocationType = getTypeFromAddress(storeLocation->getType());
+
+            // errs()<<"Found Store Instruction.\n";
+            // errs()<<"Is return is :"<<storeInst->willReturn()<<"\n";
+            // errs()<<"Operand 0: "<<getStringRepresentationOfValue(storingElement)<<" Type: "<<storingElementType<<"\n";
+            // errs()<<"Operand 1: "<<getStringRepresentationOfValue(storeLocation)<<" Type: "<<storeLocationType<<"\n";
         }
         else if (isa<LoadInst>(inst))
         {
+            LoadInst *loadInst = dyn_cast<LoadInst>(&inst);
+
+            Value *loadingTo = dyn_cast<Value>(&inst);
+            string loadingToName = getStringRepresentationOfValue(loadingTo);
+            string loadingToType = getTypeFromAddress(loadingTo->getType());
+
+            Value *loadingFrom = loadInst->getPointerOperand();
+            string loadingFromName = getStringRepresentationOfValue(loadingFrom);
+            string loadingFromType = getTypeFromAddress(loadingFrom->getType());
+
+            // errs()<<"Found load instruction\n";
+            // errs()<<"Will return is: "<<loadInst->willReturn()<<"\n";
+            // errs()<<"Loading to: "<<loadingToName<<" of Type: "<<loadingToType<<" ";
+            // errs()<<"From "<<loadingFromName<<" of Type: "<<loadingFromType<<"\n";
         }
         else if (isa<CallInst>(inst))
         {
+            CallInst *callInst = dyn_cast<CallInst>(&inst);
+            if (callInst->isInlineAsm())
+            {
+                // We still need the return address and the operand List
+                // This is actually a very rare case in user-space program
+            }
+            else
+            {
+                // This is the usual case
+                // We need the function name, function's return value
+                // And operand list
+                string functionName = callInst->getCalledFunction()->getName().str();
+
+                Value *returnPoint = dyn_cast<Value>(&inst);
+                string returnPointName = getStringRepresentationOfValue(returnPoint);
+                string returnPointType = getTypeFromAddress(returnPoint->getType());
+
+                // errs() << "Function " << functionName << " will return to " << returnPointName << " with type " << returnPointType << "\n";
+
+                int numOperands = callInst->getNumOperands();
+                for (int i = 0; i < numOperands - 1; i++)
+                {
+                    Value *argument = callInst->getArgOperand(i);
+
+                    string argumentValue = getStringRepresentationOfValue(argument);
+                    string argumentType = getTypeFromAddress(argument->getType());
+
+                    // errs() << "Argument Number: " << i << " Value: " << argumentValue << " Type: " << argumentType << "\n";
+                }
+                // errs() << "\n";
+            }
         }
         else if (isa<GetElementPtrInst>(inst))
         {
+            Value *argument = dyn_cast<Value>(&inst);
+            string returnPointName = getStringRepresentationOfValue(argument);
+            string returnPointType = getTypeFromAddress(argument->getType());
+
+            // errs() << "GetelementPointer will return to " << returnPointName << " with type " << returnPointType << "\n";
+
+            GetElementPtrInst *gepInst = dyn_cast<GetElementPtrInst>(&inst);
+            int numOperands = gepInst->getNumOperands();
+            for (int i = 0; i < numOperands; i++)
+            {
+                Value *operand = gepInst->getOperand(i);
+                string operandName = getStringRepresentationOfValue(operand);
+                string operandType = getTypeFromAddress(operand->getType());
+
+                // errs() << "Operand " << i << " Operand Name: " << operandName << " Operand Type: " << operandType << "\n";
+            }
+            // errs() << "\n";
+        }
+        else if (isa<ReturnInst>(inst))
+        {
+            // [TODO: Figure out what to do with return type ]
+        }
+        else if(isa<TruncInst>(&inst)){
+            Value *val = dyn_cast<Value>(&inst);
+            string returnPointName = getStringRepresentationOfValue(val);
+            string returnPointType = getTypeFromAddress(val->getType());
+
+            // errs() << "Truncation will return to " << returnPointName << " with type " << returnPointType << "\n";
+
+            Value *argument = inst.getOperand(0);
+            string truncationArgument = getStringRepresentationOfValue(argument);
+            string truncationArgumentType = getTypeFromAddress(argument->getType());
+
+            // errs() << "Operand Name: " << truncationArgument << " Operand Type: " << truncationArgumentType << "\n\n";
+            
+        }
+        else if(isa<BranchInst>(&inst)){
+            // [TODO: BranchInstuction is about control flow transfer. We do not need that for DDG.]
         }
         else
         {
             // [TODO: Add more instruction type + Analyze which ones are needed for our use case.]
+            Value *val = dyn_cast<Value>(&inst);
+            string returnPointName = getStringRepresentationOfValue(val);
+            string returnPointType = getTypeFromAddress(val->getType());
+            
+            // errs()<<"Instruction Name: "<<getTypeFromAddress(inst.getType()) <<" Return Point :"<<returnPointName<<" Return Type: "<<returnPointType<<"\n";
+            
+            int numOperands = inst.getNumOperands();
+            for(int i=0; i<numOperands;i++){
+                Value *operand = inst.getOperand(i);
+                string operandName = getStringRepresentationOfValue(operand);
+                string operandType = getTypeFromAddress(operand->getType());
+                // errs()<<"Operand "<<i<<": Name: "<<operandName<<" Type: "<<operandType<<"\n";
+            }
+            // errs()<<"\n";
         }
     }
 
@@ -660,8 +781,7 @@ namespace
 
                     for (auto &instruction : basicBlock)
                     {
-                        instruction.print(errs(), false);
-                        errs() << "\n";
+                        parseInstructionForDDG(const_cast<Instruction &>(instruction));
 
                         if (isa<CallInst>(instruction))
                         {
