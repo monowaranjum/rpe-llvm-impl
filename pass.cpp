@@ -29,6 +29,8 @@
 
 // GraphViz dependencies
 #include <graphviz/gvc.h>
+// This dependency is not working at the moment. Lib file not found.
+// [TODO: Fix GraphViz dependency issue. ]
 
 // Boost dependencies
 #include <boost/algorithm/string.hpp>
@@ -43,13 +45,30 @@ namespace
     vector<list<string>> paths;
 
     map<string, string> typeMap;
-    map<string, vector<string>> adjListForDDG;
+    map<string, vector< pair<string, string> >> adjListForDDG;
+
+    map<string, pair<string, int> > relevantFunctions;
+
+    map<string, vector<ProvenanceNode *>> provenanceAdjList;
 
     enum State
     {
         WHITE,
         GRAY,
         BLACK
+    };
+
+    class ProvenanceNode{
+        public:
+            string action;
+            string artifact;
+            string id;
+            ProvenanceNode(){}
+            ProvenanceNode(string act, string art, string i){
+                action = act;
+                artifact = art;
+                id = i;
+            }            
     };
 
     class AugmentedBasicBlock
@@ -62,7 +81,7 @@ namespace
         string trueBlock;            // If branched, then next true block
         string falseBlock;           // If branched, then next false block
         string nextBlock;            // If not branched, then next block
-        vector<string> instructions; // All the call instructions are stored here (operation and arguments)
+        vector<Instruction *> instructions; // All the call instructions are stored here (operation and arguments)
         vector<StringRef> functions; // All the functions are stored here (Name only)
         vector<string> parents;      // Can keep track of the parent blocks if implementation wants
     public:
@@ -131,11 +150,11 @@ namespace
             falseBlock = falseB;
         }
 
-        vector<string> getInstructions()
+        vector<Instruction *> getInstructions()
         {
             return instructions;
         }
-        void addInstruction(string instruction)
+        void addInstruction(Instruction *instruction)
         {
             instructions.push_back(instruction);
         }
@@ -156,6 +175,7 @@ namespace
             parents.push_back(parent);
         }
     };
+
 
     static string getSimpleNodeLabel(const BasicBlock &Node)
     { // Copied from Stack Overflow
@@ -266,6 +286,72 @@ namespace
         return returnValue;
     }
 
+    static void writeDDGToFile(string fileName){
+        error_code ec;
+        raw_fd_ostream output(fileName, ec);
+
+        for(auto it = adjListForDDG.begin() ; it != adjListForDDG.end(); it++ ){
+            string source = it->first;
+            vector<pair<string, string>> adjList = it->second;
+
+            for(pair<string, string> elem: adjList){
+                output<<source<<","<<typeMap[source]<<","<<elem.first<<","<<typeMap[elem.first]<<","<<elem.second<<"\n";
+            }
+        }       
+        output.close();
+    }
+
+    static int drawDDG(string graphName)
+    {
+        // This function needs libgraphviz but unformtunately I can not link it at the moment. The headers are there. But the lib files are not. I am not even sure what is the issue here. Will come back to the problem later.
+
+        Agraph_t *ddg;
+        ddg = agopen(const_cast<char *>(graphName.c_str()), Agdirected, NULL);
+
+        Agnode_t *source, *dest;
+        Agedge_t *link;
+        Agsym_t *a;
+        GVC_t *gvc;
+
+        gvc = gvContext();
+        char *layoutArgs[1];
+        layoutArgs[0] = (char *)malloc(20 * sizeof(char));
+        strcpy(layoutArgs[0], "dot");
+        gvParseArgs(gvc, 1, layoutArgs);
+
+        source = agnode(ddg, "source", 1);
+        dest = agnode(ddg, "dest", 1);
+        link = agedge(ddg, source, dest, "trunc", 1);
+
+        agsafeset(source, "color", "red", "");
+
+        gvLayoutJobs(gvc, ddg);
+        gvRenderJobs(gvc, ddg);
+
+        gvFreeLayout(gvc, ddg);
+        agclose(ddg);
+
+        return gvFreeContext(gvc);
+    }
+
+    static void addEdgeDDG(string source, string dest, string label )
+    {
+        if(source == "<badref>" || dest =="<badref>"){
+            errs()<<"Badref found. Exiting without adding the edges.\n";
+            return;
+        }
+        if (adjListForDDG.find(source) != adjListForDDG.end())
+        {
+            adjListForDDG[source].push_back(make_pair(dest, label));
+        }
+        else
+        {
+            vector< pair<string, string> > children;
+            children.push_back(make_pair(dest, label));
+            adjListForDDG[source] = children;
+        }
+    }
+
     static void parseInstructionForDDG(Instruction &inst)
     {
         if (isa<AllocaInst>(inst))
@@ -282,10 +368,14 @@ namespace
             Value *storingElement = storeInst->getOperand(0);
             string storingElementName = getStringRepresentationOfValue(storingElement);
             string storingElementType = getTypeFromAddress(storingElement->getType());
+            typeMap[storingElementName] = storingElementType;
 
             Value *storeLocation = storeInst->getPointerOperand();
             string storeLocationName = getStringRepresentationOfValue(storeLocation);
             string storeLocationType = getTypeFromAddress(storeLocation->getType());
+            typeMap[storeLocationName] = storeLocationType;
+
+            addEdgeDDG(storingElementName, storeLocationName, "store");
 
             // errs()<<"Found Store Instruction.\n";
             // errs()<<"Is return is :"<<storeInst->willReturn()<<"\n";
@@ -299,10 +389,14 @@ namespace
             Value *loadingTo = dyn_cast<Value>(&inst);
             string loadingToName = getStringRepresentationOfValue(loadingTo);
             string loadingToType = getTypeFromAddress(loadingTo->getType());
+            typeMap[loadingToName] = loadingToType;
 
             Value *loadingFrom = loadInst->getPointerOperand();
             string loadingFromName = getStringRepresentationOfValue(loadingFrom);
             string loadingFromType = getTypeFromAddress(loadingFrom->getType());
+            typeMap[loadingFromName] = loadingFromType;
+
+            addEdgeDDG(loadingFromName, loadingToName, "load");
 
             // errs()<<"Found load instruction\n";
             // errs()<<"Will return is: "<<loadInst->willReturn()<<"\n";
@@ -327,6 +421,7 @@ namespace
                 Value *returnPoint = dyn_cast<Value>(&inst);
                 string returnPointName = getStringRepresentationOfValue(returnPoint);
                 string returnPointType = getTypeFromAddress(returnPoint->getType());
+                typeMap[returnPointName] = returnPointType;
 
                 // errs() << "Function " << functionName << " will return to " << returnPointName << " with type " << returnPointType << "\n";
 
@@ -334,11 +429,13 @@ namespace
                 for (int i = 0; i < numOperands - 1; i++)
                 {
                     Value *argument = callInst->getArgOperand(i);
-
-                    string argumentValue = getStringRepresentationOfValue(argument);
+                    string argumentName = getStringRepresentationOfValue(argument);
                     string argumentType = getTypeFromAddress(argument->getType());
-
-                    // errs() << "Argument Number: " << i << " Value: " << argumentValue << " Type: " << argumentType << "\n";
+                    typeMap[argumentName] = argumentType;
+                    string label = "call:";
+                    label = label.append(functionName);
+                    addEdgeDDG(argumentName, returnPointName, label);
+                    // errs() << "Argument Number: " << i << " Value: " << argumentName << " Type: " << argumentType << "\n";
                 }
                 // errs() << "\n";
             }
@@ -348,6 +445,7 @@ namespace
             Value *argument = dyn_cast<Value>(&inst);
             string returnPointName = getStringRepresentationOfValue(argument);
             string returnPointType = getTypeFromAddress(argument->getType());
+            typeMap[returnPointName] = returnPointType;
 
             // errs() << "GetelementPointer will return to " << returnPointName << " with type " << returnPointType << "\n";
 
@@ -358,7 +456,8 @@ namespace
                 Value *operand = gepInst->getOperand(i);
                 string operandName = getStringRepresentationOfValue(operand);
                 string operandType = getTypeFromAddress(operand->getType());
-
+                typeMap[operandName] = operandType;
+                addEdgeDDG(operandName, returnPointName, "getelementptr");
                 // errs() << "Operand " << i << " Operand Name: " << operandName << " Operand Type: " << operandType << "\n";
             }
             // errs() << "\n";
@@ -367,21 +466,25 @@ namespace
         {
             // [TODO: Figure out what to do with return type ]
         }
-        else if(isa<TruncInst>(&inst)){
+        else if (isa<TruncInst>(&inst))
+        {
             Value *val = dyn_cast<Value>(&inst);
             string returnPointName = getStringRepresentationOfValue(val);
             string returnPointType = getTypeFromAddress(val->getType());
-
+            typeMap[returnPointName] = returnPointType;
             // errs() << "Truncation will return to " << returnPointName << " with type " << returnPointType << "\n";
 
             Value *argument = inst.getOperand(0);
             string truncationArgument = getStringRepresentationOfValue(argument);
             string truncationArgumentType = getTypeFromAddress(argument->getType());
+            typeMap[truncationArgument] = truncationArgumentType;
+
+            addEdgeDDG(truncationArgument, returnPointName, "truncate");
 
             // errs() << "Operand Name: " << truncationArgument << " Operand Type: " << truncationArgumentType << "\n\n";
-            
         }
-        else if(isa<BranchInst>(&inst)){
+        else if (isa<BranchInst>(&inst))
+        {
             // [TODO: BranchInstuction is about control flow transfer. We do not need that for DDG.]
         }
         else
@@ -390,18 +493,34 @@ namespace
             Value *val = dyn_cast<Value>(&inst);
             string returnPointName = getStringRepresentationOfValue(val);
             string returnPointType = getTypeFromAddress(val->getType());
-            
+            typeMap[returnPointName] = returnPointType;
+
             // errs()<<"Instruction Name: "<<getTypeFromAddress(inst.getType()) <<" Return Point :"<<returnPointName<<" Return Type: "<<returnPointType<<"\n";
-            
+
             int numOperands = inst.getNumOperands();
-            for(int i=0; i<numOperands;i++){
+            for (int i = 0; i < numOperands; i++)
+            {
                 Value *operand = inst.getOperand(i);
                 string operandName = getStringRepresentationOfValue(operand);
                 string operandType = getTypeFromAddress(operand->getType());
+                typeMap[operandName] = operandType;
+                
+                addEdgeDDG(operandName, returnPointName, "NYI"); 
                 // errs()<<"Operand "<<i<<": Name: "<<operandName<<" Type: "<<operandType<<"\n";
             }
             // errs()<<"\n";
         }
+    }
+
+    static void loadRelevantFunction(){
+        relevantFunctions["open"] = make_pair("FILE",-1);
+        relevantFunctions["read"] = make_pair("FILE",0);
+        relevantFunctions["write"] = make_pair("FILE",0);
+        relevantFunctions["close"] = make_pair("FILE",0);
+        relevantFunctions["fopen"] = make_pair("FILE",-1);
+        relevantFunctions["fread"] = make_pair("FILE",0);
+        relevantFunctions["fwrite"] = make_pair("FILE",0);
+        relevantFunctions["fclose"] = make_pair("FILE",0);
     }
 
     static void parseCallInstruction(CallInst *call, Instruction *inst, AugmentedBasicBlock *currBlock)
@@ -410,12 +529,12 @@ namespace
         {
             parseInlineAssemblyString(getInstructionString(inst), call);
             currBlock->setInlineAssembly();
-            currBlock->addInstruction(getInstructionString(inst));
+            currBlock->addInstruction(inst);
         }
         else
         {
 
-            currBlock->addInstruction(getInstructionString(inst));
+            currBlock->addInstruction(inst);
             Function *function = call->getCalledFunction();
             if (function != NULL)
             {
@@ -423,14 +542,14 @@ namespace
                 errs() << "Current Function: " << function->getName() << "\n";
 
                 int numOperands = call->getNumOperands();
-                errs() << "Number of operands: " << numOperands << "\n";
+                // errs() << "Number of operands: " << numOperands << "\n";
                 for (int i = 0; i < numOperands - 1; i++)
                 {
                     Value *operand = call->getArgOperand(i);
                     operand->print(errs(), false);
-                    errs() << "\nOperand Type is: " << getTypeFromAddress(operand->getType()) << "\n";
+                    // errs() << "\nOperand Type is: " << getTypeFromAddress(operand->getType()) << "\n";
                 }
-                errs() << "Returns to: " << getLeftHandSide(inst) << "\n";
+                // errs() << "Returns to: " << getLeftHandSide(inst) << "\n";
             }
             else
             {
@@ -612,8 +731,27 @@ namespace
         }
     }
 
+    static bool checkLoadStoreSequenceBetweenNodesinDDG(string source, string dest){
+        if(source == dest){
+            return true;
+        }
+        if(adjListForDDG.find(source) == adjListForDDG.end()){
+            return false;
+        }
+
+        vector<pair<string, string> > adjList = adjListForDDG[source];
+        bool ret = false;
+        for(pair<string, string> element : adjList){
+            if(element.second == "store" || element.second == "load" || element.second == "truncate"){
+                ret |= checkLoadStoreSequenceBetweenNodesinDDG(element.first, dest);
+            }
+        }
+        return ret;        
+    }
+
     static void printFunctionalPaths(map<string, AugmentedBasicBlock> acfgNodes)
     {
+        loadRelevantFunction();
         int count = 0;
         for (list<string> path : paths)
         {
@@ -623,16 +761,25 @@ namespace
             {
                 if (node != "START" && node != "END")
                 {
-                    errs() << "Functions in Block : " << node << "\n";
+                    //errs() << "Functions in Block : " << node << "\n";
                     AugmentedBasicBlock abb = acfgNodes[node];
-                    vector<StringRef> functionsInThisBlock = abb.getFunctions();
-                    for (StringRef func : functionsInThisBlock)
+                    vector<Instruction *> instructionsInBlock = abb.getInstructions();
+                    for (Instruction *inst : instructionsInBlock)
                     {
-                        errs() << func << "    ";
+                        CallInst *call = dyn_cast<CallInst>(inst);
+                        string funcName = call->getCalledFunction()->getName().str();
+                        if(relevantFunctions.find(funcName) != relevantFunctions.end()){
+                            Value *val = dyn_cast<Value>(inst);
+
+                        }
+                        else{
+                            errs()<<"Function "<<funcName<<" Is not relevant.\n";
+                        }
                     }
                     errs() << "\n";
                 }
             }
+            break;
         }
     }
 
@@ -787,13 +934,13 @@ namespace
                         {
                             Instruction *inst = const_cast<Instruction *>(&instruction);
                             CallInst *call = dyn_cast<CallInst>(inst);
-                            // parseCallInstruction(call, inst, &acfgNode);
+                            parseCallInstruction(call, inst, &acfgNode);
                         }
                         else if (isa<BranchInst>(instruction))
                         {
                             Instruction *inst = const_cast<Instruction *>(&instruction);
                             BranchInst *brInst = dyn_cast<BranchInst>(inst);
-                            // parseBinaryBranchInstruction(brInst, &acfgNode);
+                            parseBinaryBranchInstruction(brInst, &acfgNode);
                         }
                         else if (isa<SwitchInst>(instruction))
                         {
@@ -803,8 +950,16 @@ namespace
 
                     idAcfgNode[acfgNode.getBlockId()] = acfgNode;
                 }
+                // drawDDG("Demo");
                 // printEdgeList(edgeList);
-                // extractPaths(edgeList, idAcfgNode, rootBlockId);
+                extractPaths(edgeList, idAcfgNode, rootBlockId);
+
+                // bool test1 = checkLoadStoreSequenceBetweenNodesinDDG("%17","%20");
+                // bool test2 = checkLoadStoreSequenceBetweenNodesinDDG("%17","%24");
+                // bool test3 = checkLoadStoreSequenceBetweenNodesinDDG("%24", "%28");
+
+                // errs()<<test1<<" "<<test2<<" "<<test3<<"\n";
+                // writeDDGToFile("ddgedges.txt");
             }
             return false;
         }
