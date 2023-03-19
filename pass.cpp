@@ -1,41 +1,5 @@
-// STL dependencies
-#include <algorithm>
-#include <vector>
-#include <map>
-#include <stack>
-#include <list>
-#include <utility>
-#include <string>
-#include <regex>
-#include <iterator>
-#include <set>
-
-// LLVM dependencies
-#include "llvm/Pass.h"
-#include "llvm/IR/Function.h"
-#include "llvm/Support/raw_ostream.h"
-#include "llvm/IR/LegacyPassManager.h"
-#include "llvm/Transforms/IPO/PassManagerBuilder.h"
-#include "llvm/IR/Module.h"
-#include "llvm/IR/BasicBlock.h"
-#include "llvm/IR/CFG.h"
-#include "llvm/IR/InstrTypes.h"
-#include "llvm/IR/AbstractCallSite.h"
-#include "llvm/IR/Instructions.h"
-#include "llvm/Analysis/DDG.h"
-#include "llvm/Analysis/DDGPrinter.h"
-#include "llvm/IR/Constants.h"
-
-// JSON dependencies
-#include <jsoncpp/json/json.h>
-
-// GraphViz dependencies
-#include <graphviz/gvc.h>
-// This dependency is not working at the moment. Lib file not found.
-// [TODO: Fix GraphViz dependency issue. ]
-
-// Boost dependencies
-#include <boost/algorithm/string.hpp>
+#include "utility.cpp"
+#include "abb.cpp"
 
 using namespace llvm;
 using namespace std;
@@ -44,303 +8,41 @@ namespace
 {
     vector<string> loopingBlocks;
     map<string, int> visited;
-    vector<list<string>> paths;
-
+    vector<PATH> canonicalPaths;
+    map<string, vector<PATH>> loopingPaths;
     map<string, string> typeMap;
-    map<string, vector< pair<string, string> >> adjListForDDG;
-
-    map<string, pair<string, int> > relevantFunctions;
-
-    
-
-    enum State
-    {
-        WHITE,
-        GRAY,
-        BLACK
-    };
-
-    class ProvenanceNode{
-        public:
-            string action;
-            string artifact;
-            string id;
-            ProvenanceNode(){}
-            ProvenanceNode(string act, string art, string i){
-                action = act;
-                artifact = art;
-                id = i;
-            }            
-    };
-
-    class AugmentedBasicBlock
-    {
-    private:
-        string blockId;              // Unique Block Id
-        bool isRootBlock;            // Defines if this is the starting block of the function.
-        bool isConditionalBlock;     // Does it have branching at the end or just a straight jump to next block
-        bool hasInlineAssembly;      // Is there any inline assembly instruction? Then parse separately
-        string trueBlock;            // If branched, then next true block
-        string falseBlock;           // If branched, then next false block
-        string nextBlock;            // If not branched, then next block
-        vector<Instruction *> instructions; // All the call instructions are stored here (operation and arguments)
-        vector<StringRef> functions; // All the functions are stored here (Name only)
-        vector<string> parents;      // Can keep track of the parent blocks if implementation wants
-    public:
-        AugmentedBasicBlock()
-        {
-            isConditionalBlock = false;
-            hasInlineAssembly = false;
-            isRootBlock = false;
-        }
-
-        string getBlockId()
-        {
-            return blockId;
-        }
-        void setBlockId(string blockID)
-        {
-            blockId = blockID;
-        }
-
-        void setRootBlock()
-        {
-            isRootBlock = true;
-        }
-        bool isARootBlock()
-        {
-            return isRootBlock;
-        }
-        void setInlineAssembly()
-        {
-            hasInlineAssembly = true;
-        }
-        bool getInlineAssemblyStatus()
-        {
-            return hasInlineAssembly;
-        }
-        void setConditionalBlock()
-        {
-            isConditionalBlock = true;
-        }
-        bool getConditionalBlock()
-        {
-            return isConditionalBlock;
-        }
-        string getNextBlock()
-        {
-            return nextBlock;
-        }
-        void setNextBlock(string nextB)
-        {
-            nextBlock = nextB;
-        }
-        string getTrueBlock()
-        {
-            return trueBlock;
-        }
-        void setTrueBlock(string trueB)
-        {
-            trueBlock = trueB;
-        }
-        string getFalseBlock()
-        {
-            return falseBlock;
-        }
-        void setFalseBlock(string falseB)
-        {
-            falseBlock = falseB;
-        }
-
-        vector<Instruction *> getInstructions()
-        {
-            return instructions;
-        }
-        void addInstruction(Instruction *instruction)
-        {
-            instructions.push_back(instruction);
-        }
-        vector<StringRef> getFunctions()
-        {
-            return functions;
-        }
-        void addFunction(StringRef functionName)
-        {
-            functions.push_back(functionName);
-        }
-        vector<string> getParents()
-        {
-            return parents;
-        }
-        void addParent(string parent)
-        {
-            parents.push_back(parent);
-        }
-    };
-
+    map<string, vector<EDGE>> adjListForDDG;
+    map<string, pair<string, int>> relevantFunctions;
+    set<string> loopAwareVisited;
     map<string, vector<ProvenanceNode *>> provenanceAdjList;
+    map<string, EDGE> backEdges;
+    GRAPH canonicalAdjList;
+    GRAPH dagAdjList;
+    map<string, string> constantValueFlowMap;
 
-    static string getSimpleNodeLabel(const BasicBlock &Node)
-    { // Copied from Stack Overflow
-        if (!Node.getName().empty())
-            return Node.getName().str();
-
-        string Str;
-        raw_string_ostream OS(Str);
-
-        Node.printAsOperand(OS, false);
-        return OS.str();
-    }
-
-    static string getSimpleNodeLabel(const BasicBlock *Node)
-    { // Pointer Version
-        if (!Node->getName().empty())
-        {
-            return Node->getName().str();
-        }
-        string Str;
-        raw_string_ostream OS(Str);
-
-        Node->printAsOperand(OS, false);
-        return OS.str();
-    }
-
-    static string getStringRepresentationOfValue(Value *value)
+    static void writeDDGToFile(string fileName)
     {
-        string s;
-        raw_string_ostream OS(s);
-        value->printAsOperand(OS, false);
-        return OS.str();
-    }
-
-    static string getTypeFromAddress(Type *type)
-    {
-        string s;
-        raw_string_ostream OS(s);
-        type->print(OS, false);
-        return OS.str();
-    }
-
-    static string getInstructionString(Instruction *inst)
-    {
-        string s;
-        raw_string_ostream ss(s);
-        ss << *inst;
-        return ss.str();
-    }
-
-    static void parseInlineAssemblyString(string instructionString, CallInst *call)
-    {
-
-        // errs() << "\n\n";
-        regex pattern("\"([^\"]*)\"");
-        sregex_iterator start(instructionString.begin(), instructionString.end(), pattern);
-        sregex_iterator end;
-        for (sregex_iterator current = start; current != end; ++current)
-        {
-            smatch match = *current;
-            // errs() << match.str() << "\n";
-        }
-        // errs() << "Parsing complete.\n";
-
-        assert(call != NULL);
-        int numOperands = call->getNumOperands();
-        for (int i = 0; i < numOperands - 1; i++)
-        {
-            Value *operand = call->getArgOperand(i);
-            // operand->print(errs(), false);
-            // errs() << "\n";
-        }
-    }
-
-    static string getLeftHandSide(Instruction *inst)
-    {
-        // Untested Functionality
-        string Str;
-        raw_string_ostream OS(Str);
-
-        inst->print(OS, false);
-        string instString = OS.str();
-        size_t foundAt = instString.find('=');
-        string returnValue;
-        if (foundAt != string::npos)
-        {
-            returnValue = instString.substr(0, foundAt);
-            boost::trim(returnValue);
-        }
-        return returnValue;
-    }
-
-    static string getRightHandSide(Instruction *inst)
-    {
-        string Str;
-        raw_string_ostream OS(Str);
-
-        inst->print(OS, false);
-        string instString = OS.str();
-        size_t foundAt = instString.find('=');
-        string returnValue;
-        int len = instString.length();
-        if (foundAt != string::npos)
-        {
-            returnValue = instString.substr(foundAt + 1);
-            boost::trim(returnValue);
-        }
-        return returnValue;
-    }
-
-    static void writeDDGToFile(string fileName){
         error_code ec;
         raw_fd_ostream output(fileName, ec);
 
-        for(auto it = adjListForDDG.begin() ; it != adjListForDDG.end(); it++ ){
+        for (auto it = adjListForDDG.begin(); it != adjListForDDG.end(); it++)
+        {
             string source = it->first;
             vector<pair<string, string>> adjList = it->second;
 
-            for(pair<string, string> elem: adjList){
-                output<<source<<","<<typeMap[source]<<","<<elem.first<<","<<typeMap[elem.first]<<","<<elem.second<<"\n";
+            for (pair<string, string> elem : adjList)
+            {
+                output << source << "," << typeMap[source] << "," << elem.first << "," << typeMap[elem.first] << "," << elem.second << "\n";
             }
-        }       
+        }
         output.close();
     }
 
-    static int drawDDG(string graphName)
+    static void addEdgeDDG(string source, string dest, string label)
     {
-        // This function needs libgraphviz but unformtunately I can not link it at the moment. The headers are there. But the lib files are not. I am not even sure what is the issue here. Will come back to the problem later.
-
-        Agraph_t *ddg;
-        ddg = agopen(const_cast<char *>(graphName.c_str()), Agdirected, NULL);
-
-        Agnode_t *source, *dest;
-        Agedge_t *link;
-        Agsym_t *a;
-        GVC_t *gvc;
-
-        gvc = gvContext();
-        char *layoutArgs[1];
-        layoutArgs[0] = (char *)malloc(20 * sizeof(char));
-        strcpy(layoutArgs[0], "dot");
-        gvParseArgs(gvc, 1, layoutArgs);
-
-        source = agnode(ddg, "source", 1);
-        dest = agnode(ddg, "dest", 1);
-        link = agedge(ddg, source, dest, "trunc", 1);
-
-        agsafeset(source, "color", "red", "");
-
-        gvLayoutJobs(gvc, ddg);
-        gvRenderJobs(gvc, ddg);
-
-        gvFreeLayout(gvc, ddg);
-        agclose(ddg);
-
-        return gvFreeContext(gvc);
-    }
-
-    static void addEdgeDDG(string source, string dest, string label )
-    {
-        if(source == "<badref>" || dest =="<badref>"){
-            errs()<<"Badref found. Exiting without adding the edges.\n";
+        if (source == "<badref>" || dest == "<badref>")
+        {
+            errs() << "Badref found. Exiting without adding the edges.\n";
             return;
         }
         if (adjListForDDG.find(source) != adjListForDDG.end())
@@ -349,7 +51,7 @@ namespace
         }
         else
         {
-            vector< pair<string, string> > children;
+            vector<pair<string, string>> children;
             children.push_back(make_pair(dest, label));
             adjListForDDG[source] = children;
         }
@@ -490,6 +192,29 @@ namespace
         {
             // [TODO: BranchInstuction is about control flow transfer. We do not need that for DDG.]
         }
+        else if(isa<ICmpInst>(&inst)){
+            Value *val = dyn_cast<Value>(&inst);
+            string comparisonResult = getStringRepresentationOfValue(val);
+            string comparisonResultType = getTypeFromAddress(val->getType());
+            typeMap[comparisonResult] = comparisonResultType;
+
+            Value *operand0 = inst.getOperand(0);
+            Value *operand1 = inst.getOperand(1);
+
+            string firstOperandName = getStringRepresentationOfValue(operand0);
+            string firstOperandType = getTypeFromAddress(operand0->getType());
+            typeMap[firstOperandName] = firstOperandType;
+
+            string secondOperandName = getStringRepresentationOfValue(operand1);
+            string seconndOperandType = getTypeFromAddress(operand1->getType());
+            typeMap[secondOperandName] = seconndOperandType;
+
+            ICmpInst *icmpInst = dyn_cast<ICmpInst>(&inst);
+            string predicateName = icmpInst->getPredicateName(icmpInst->getPredicate()).str();
+
+            addEdgeDDG(firstOperandName, comparisonResult, "icmp:0 "+predicateName);
+            addEdgeDDG(secondOperandName, comparisonResult, "icmp:1 "+predicateName);
+        }
         else
         {
             // [TODO: Add more instruction type + Analyze which ones are needed for our use case.]
@@ -507,23 +232,23 @@ namespace
                 string operandName = getStringRepresentationOfValue(operand);
                 string operandType = getTypeFromAddress(operand->getType());
                 typeMap[operandName] = operandType;
-                
-                addEdgeDDG(operandName, returnPointName, "NYI"); 
-                // errs()<<"Operand "<<i<<": Name: "<<operandName<<" Type: "<<operandType<<"\n";
+
+                addEdgeDDG(operandName, returnPointName, inst.getOpcodeName() );
             }
             // errs()<<"\n";
         }
     }
 
-    static void loadRelevantFunction(){
-        relevantFunctions["open"] = make_pair("FILE",-1);
-        relevantFunctions["read"] = make_pair("FILE",0);
-        relevantFunctions["write"] = make_pair("FILE",0);
-        relevantFunctions["close"] = make_pair("FILE",0);
-        relevantFunctions["fopen"] = make_pair("FILE",-1);
-        relevantFunctions["fread"] = make_pair("FILE",0);
-        relevantFunctions["fwrite"] = make_pair("FILE",0);
-        relevantFunctions["fclose"] = make_pair("FILE",0);
+    static void loadRelevantFunction()
+    {
+        relevantFunctions["open"] = make_pair("FILE", -1);
+        relevantFunctions["read"] = make_pair("FILE", 0);
+        relevantFunctions["write"] = make_pair("FILE", 0);
+        relevantFunctions["close"] = make_pair("FILE", 0);
+        relevantFunctions["fopen"] = make_pair("FILE", -1);
+        relevantFunctions["fread"] = make_pair("FILE", 0);
+        relevantFunctions["fwrite"] = make_pair("FILE", 0);
+        relevantFunctions["fclose"] = make_pair("FILE", 0);
     }
 
     static void parseCallInstruction(CallInst *call, Instruction *inst, AugmentedBasicBlock *currBlock)
@@ -542,17 +267,11 @@ namespace
             if (function != NULL)
             {
                 currBlock->addFunction(function->getName());
-                errs() << "Current Function: " << function->getName() << "\n";
-
                 int numOperands = call->getNumOperands();
-                // errs() << "Number of operands: " << numOperands << "\n";
                 for (int i = 0; i < numOperands - 1; i++)
                 {
                     Value *operand = call->getArgOperand(i);
-                    operand->print(errs(), false);
-                    // errs() << "\nOperand Type is: " << getTypeFromAddress(operand->getType()) << "\n";
                 }
-                // errs() << "Returns to: " << getLeftHandSide(inst) << "\n";
             }
             else
             {
@@ -583,15 +302,7 @@ namespace
         // [TODO]
     }
 
-    static void printEdgeList(vector<pair<string, string>> eList)
-    {
-        for (pair<string, string> edge : eList)
-        {
-            errs() << edge.first << " -> " << edge.second << "\n";
-        }
-    }
-
-    static bool loopDfsUtil(map<string, vector<string>> adjList, string node)
+    static bool loopDfsUtil(GRAPH adjList, string node)
     {
         // errs()<<"Called with node: "<<node<<"\n";
         visited[node] = GRAY;
@@ -603,6 +314,7 @@ namespace
             {
                 // errs()<<"Loop detected\n";
                 loopingBlocks.push_back(child);
+                backEdges[node] = make_pair(node, child); // The looping block is the key. The backedge is the value.
                 res = true;
             }
             if (visited[child] == WHITE && loopDfsUtil(adjList, child))
@@ -614,7 +326,7 @@ namespace
         return res;
     }
 
-    static pair<bool, vector<string>> containsLoop(map<string, vector<string>> adjList, string root)
+    static pair<bool, vector<string>> containsLoop(GRAPH adjList, string root)
     {
 
         loopingBlocks.clear();
@@ -631,14 +343,14 @@ namespace
         return make_pair(hasLoop, loopingBlocks);
     }
 
-    static void monolithicTraverse(map<string, vector<string>> adjList, string node, list<string> currentPath)
+    static void monolithicTraverse(GRAPH adjList, string node, list<string> currentPath)
     {
         currentPath.push_back(node);
         vector<string> children = adjList[node];
         if (children.empty())
         {
             // This is a leaf node.
-            paths.push_back(currentPath);
+            canonicalPaths.push_back(currentPath);
         }
         else
         {
@@ -650,55 +362,53 @@ namespace
         }
     }
 
-    static void loopAwareTraverse(map<string, vector<string>> adjList, map<string, AugmentedBasicBlock> acfgNodes, string node, list<string> currentPath)
+    static void loopAwareTraverse(GRAPH adjList, map<string, AugmentedBasicBlock> acfgNodes, string node, list<string> currentPath)
     {
-        // If loop exists we have to handle it differently
-        errs() << "Loop aware traversal called for node: " << node << "\n";
+        // Check if it is a looping node and have been called already
+        if (find(loopingBlocks.begin(), loopingBlocks.end(), node) != loopingBlocks.end())
+        {
+            if (find(loopAwareVisited.begin(), loopAwareVisited.end(), node) != loopAwareVisited.end())
+            {
+                return;
+            }
+        }
+
         currentPath.push_back(node);
         AugmentedBasicBlock acfgNode = acfgNodes[node];
-        if (acfgNode.getConditionalBlock())
-        { // Find if this is a conditional block.
-            if (!loopingBlocks.empty() && find(loopingBlocks.begin(), loopingBlocks.end(), node) != loopingBlocks.end())
+        if (!loopingBlocks.empty() && find(loopingBlocks.begin(), loopingBlocks.end(), node) != loopingBlocks.end())
+        {
+            if (acfgNode.getConditionalBlock())
             {
-                // We are at a node that contains a looping block.
-                // Isolating the true block and going to the false block only.
-                errs() << "Found a looping block: " << node << "\n";
-                string trueNode = acfgNode.getTrueBlock();
+                // Loop and Conditional. So either For loop or While Loop.
                 string falseNode = acfgNode.getFalseBlock();
-                // Clone the current path and call on the false node only.
-                list<string> currentPathClone(currentPath);
-                loopAwareTraverse(adjList, acfgNodes, falseNode, currentPathClone);
+                list<string> clonedCurrentPath(currentPath);
+                loopAwareVisited.insert(node);
+                loopAwareTraverse(adjList, acfgNodes, falseNode, clonedCurrentPath);
             }
             else
             {
-                // We are at a node thats a branched node, but no loops
-                vector<string> children = adjList[node];
-                if (children.empty())
-                {
-                    paths.push_back(currentPath);
-                }
-                else
-                {
-                    for (string child : children)
-                    {
-                        list<string> currentPathClone(currentPath);
-                        loopAwareTraverse(adjList, acfgNodes, child, currentPathClone);
-                    }
-                }
+                // Loop and Unconditional. So do-while loop.
+                string nextNode = acfgNode.getNextBlock();
+                loopAwareVisited.insert(node);
+                list<string> clonedCurrentPath(currentPath);
+                loopAwareTraverse(adjList, acfgNodes, nextNode, clonedCurrentPath);
             }
         }
         else
         {
             // Not a conditional block. Straight to next children block
             vector<string> children = adjList[node];
+            loopAwareVisited.insert(node);
             if (children.empty())
             {
-                paths.push_back(currentPath);
+                // Reached a leaf node. This is a complete path.
+                canonicalPaths.push_back(currentPath);
             }
             else
             {
                 for (string child : children)
                 {
+                    // Clone the existing path and pass it along for the next layer.
                     list<string> currentPathClone(currentPath);
                     loopAwareTraverse(adjList, acfgNodes, child, currentPathClone);
                 }
@@ -706,66 +416,47 @@ namespace
         }
     }
 
-    static void printAdjacencyList(map<string, vector<string>> adjacencyList)
+    static bool checkLoadStoreSequenceBetweenNodesinDDG(string source, string dest)
     {
-        errs() << "Adjacency List Is:\n";
-        for (auto key : adjacencyList)
+        if (source == dest)
         {
-            errs() << key.first << " -> ";
-            for (auto elem : key.second)
-            {
-                errs() << elem << ", ";
-            }
-            errs() << "\n";
-        }
-    }
-
-    static void printPaths()
-    {
-        int pathNum = 0;
-        for (list<string> path : paths)
-        {
-            errs() << "Path Number: " << ++pathNum << "\nSTART -> ";
-            for (string node : path)
-            {
-                errs() << node << " -> ";
-            }
-            errs() << "END\n";
-        }
-    }
-
-    static bool checkLoadStoreSequenceBetweenNodesinDDG(string source, string dest){
-        if(source == dest){
             return true;
         }
-        if(adjListForDDG.find(source) == adjListForDDG.end()){
+        if (adjListForDDG.find(source) == adjListForDDG.end())
+        {
             return false;
         }
 
-        vector<pair<string, string> > adjList = adjListForDDG[source];
+        vector<pair<string, string>> adjList = adjListForDDG[source];
         bool ret = false;
-        for(pair<string, string> element : adjList){
-            if(element.second == "store" || element.second == "load" || element.second == "truncate"){
+        for (pair<string, string> element : adjList)
+        {
+            if (element.second == "store" || element.second == "load" || element.second == "truncate")
+            {
                 ret |= checkLoadStoreSequenceBetweenNodesinDDG(element.first, dest);
             }
         }
-        return ret;        
+        return ret;
     }
 
-    static void printProvenanceEdges(){
+    static void printProvenanceEdges()
+    {
         vector<ProvenanceNode *> adjList = provenanceAdjList["process_name"];
-        for(ProvenanceNode *node : adjList){
-            errs()<<node->action<<" "<<node->artifact<<" "<<node->id<<"\n";
+        for (ProvenanceNode *node : adjList)
+        {
+            errs() << node->action << " " << node->artifact << " " << node->id << "\n";
         }
     }
 
-    static void dumpProvenanceEdges(string fileName){
+    static void dumpProvenanceEdges(string fileName)
+    {
         error_code ec;
         raw_fd_ostream output(fileName, ec);
 
         vector<ProvenanceNode *> adjList = provenanceAdjList["process_name"];
-        for(ProvenanceNode *elem: adjList){
-            output<<elem->action<<","<<elem->artifact<<","<<elem->id<<"\n";
+        for (ProvenanceNode *elem : adjList)
+        {
+            output << elem->action << "," << elem->artifact << "," << elem->id << "\n";
         }
         output.close();
     }
@@ -778,7 +469,7 @@ namespace
         edges.push_back(&start);
         provenanceAdjList["process_name"] = edges;
         int count = 0;
-        for (list<string> path : paths)
+        for (list<string> path : canonicalPaths)
         {
             errs() << "Path Number : " << ++count << "\n\n";
             // Get each block id and access the function vector from the acfgNodesMap
@@ -786,63 +477,71 @@ namespace
             {
                 if (node != "START" && node != "END")
                 {
-                    //errs() << "Functions in Block : " << node << "\n";
+                    // errs() << "Functions in Block : " << node << "\n";
                     AugmentedBasicBlock abb = acfgNodes[node];
                     vector<Instruction *> instructionsInBlock = abb.getInstructions();
                     for (Instruction *inst : instructionsInBlock)
                     {
                         CallInst *call = dyn_cast<CallInst>(inst);
                         string funcName = call->getCalledFunction()->getName().str();
-                        if(relevantFunctions.find(funcName) != relevantFunctions.end()){
-                            
+                        if (relevantFunctions.find(funcName) != relevantFunctions.end())
+                        {
+
                             pair<string, int> relevantInfo = relevantFunctions[funcName];
-                            if(relevantInfo.second == -1){
+                            if (relevantInfo.second == -1)
+                            {
                                 Value *val = dyn_cast<Value>(inst);
                                 string id = getStringRepresentationOfValue(val);
                                 ProvenanceNode *node1 = new ProvenanceNode(funcName, relevantInfo.first, id);
                                 provenanceAdjList["process_name"].push_back(node1);
                             }
-                            else{
+                            else
+                            {
                                 Value *val = call->getArgOperand(relevantInfo.second);
                                 string id = getStringRepresentationOfValue(val);
                                 ProvenanceNode *node1 = new ProvenanceNode(funcName, relevantInfo.first, id);
                                 provenanceAdjList["process_name"].push_back(node1);
-                            }                            
+                            }
                         }
-                        else{
-                            errs()<<"Function "<<funcName<<" Is not relevant.\n";
+                        else
+                        {
+                            errs() << "Function " << funcName << " Is not relevant.\n";
                         }
                     }
                 }
             }
-            ProvenanceNode *exitNode = new ProvenanceNode("exit","PROCESS","process_name_exit");
+            ProvenanceNode *exitNode = new ProvenanceNode("exit", "PROCESS", "process_name_exit");
             provenanceAdjList["process_name"].push_back(exitNode);
-
+            printProvenanceEdges();
             set<string> uniqueObjects;
             uniqueObjects.insert("process_name");
             vector<ProvenanceNode *> adjList = provenanceAdjList["process_name"];
-            for(ProvenanceNode *elem: adjList){
+            for (ProvenanceNode *elem : adjList)
+            {
                 string currId = elem->id;
                 bool result = false;
-                for(string uObj:uniqueObjects){
+                for (string uObj : uniqueObjects)
+                {
                     result |= checkLoadStoreSequenceBetweenNodesinDDG(uObj, currId);
-                    if(result){
+                    if (result)
+                    {
                         elem->id = uObj;
                         break;
                     }
                 }
-                if(!result){
+                if (!result)
+                {
                     uniqueObjects.insert(currId);
                 }
             }
 
             printProvenanceEdges();
             dumpProvenanceEdges("prov_edges.txt");
-            break; // This is temporary. 
+            break; // This is temporary.
         }
     }
 
-    static map<string, vector<string>> buildAdjacencyList(vector<pair<string, string>> eList, map<string, AugmentedBasicBlock> acfgNodes, bool debug = false)
+    static GRAPH buildAdjacencyList(vector<EDGE> eList, map<string, AugmentedBasicBlock> acfgNodes, bool debug = false)
     {
         map<string, vector<string>> adjacencyList;
 
@@ -880,40 +579,97 @@ namespace
         return adjacencyList;
     }
 
-    static void extractPaths(vector<pair<string, string>> eList, map<string, AugmentedBasicBlock> acfgNodes, string rootId)
+    static GRAPH extractDirectedAdjList(GRAPH adjList, map<string, EDGE> bEdges)
     {
-        map<string, vector<string>> adjList = buildAdjacencyList(eList, acfgNodes, true);
+        map<string, vector<string>> directedAcgf;
+
+        for (auto &elem : adjList)
+        {
+            if (bEdges.find(elem.first) != bEdges.end())
+            {
+                vector<string> clonedAdjList(elem.second);
+                pair<string, string> edge = bEdges[elem.first];
+                for (vector<string>::iterator it = clonedAdjList.begin(); it != clonedAdjList.end(); ++it)
+                {
+                    if (*it == edge.second)
+                    {
+                        clonedAdjList.erase(it);
+                        break;
+                    }
+                }
+                directedAcgf[elem.first] = clonedAdjList;
+            }
+            else
+            {
+                vector<string> clonedAdjList(elem.second);
+                directedAcgf[elem.first] = clonedAdjList;
+            }
+        }
+        return directedAcgf;
+    }
+
+    static void extractCanonicalPaths(vector<EDGE> eList, map<string, AugmentedBasicBlock> acfgNodes, string rootId)
+    {
+        GRAPH adjList = buildAdjacencyList(eList, acfgNodes, true);
         pair<bool, vector<string>> loopAnalysis = containsLoop(adjList, rootId);
+        canonicalPaths.clear();
+        list<string> initialEmptyPath;
         if (!loopAnalysis.first)
         {
             errs() << "No Loop Found. Initiating monolithic traversal.\n";
-            paths.clear();
-            list<string> initialEmptyPath;
             monolithicTraverse(adjList, rootId, initialEmptyPath);
         }
         else
         {
             errs() << "Loop found. Initiating loop aware traversal.\n";
-            errs() << "Looping blocks are: ";
-            for (auto elem : loopingBlocks)
-            {
-                errs() << elem << " ";
-            }
-            errs() << "\n";
-            paths.clear();
-            list<string> initialEmptyPath;
+            printLoopingBlocks(loopingBlocks);
+            printBackEdges(backEdges);
             loopAwareTraverse(adjList, acfgNodes, rootId, initialEmptyPath);
         }
-        printPaths();
-        errs() << "\n";
-        generateProvenanceEdges(acfgNodes);
+        printPaths(canonicalPaths);
+        canonicalAdjList = adjList;
+        dagAdjList = extractDirectedAdjList(canonicalAdjList, backEdges);
+        errs() << "******************** directed adjlist ****************\n";
+        printAdjacencyList(dagAdjList);
+        errs() << "\n\n";
+        // generateProvenanceEdges(acfgNodes);
+    }
+
+    static void dagDfsUtil(GRAPH dagGraph, string anchor ,string src, string dst, PATH currentPath){
+        currentPath.push_back(src);
+        if(src == dst){
+            // Enter this in the loops possible execution path. 
+            if(loopingPaths.find(anchor) == loopingPaths.end()){
+                vector<PATH> tempPaths;
+                tempPaths.push_back(currentPath);
+                loopingPaths[anchor] = tempPaths;
+            }
+            else{
+                loopingPaths[anchor].push_back(currentPath);
+            }
+            return;
+        }
+
+        EDGE_LIST edge_list = dagGraph[src];
+        for(string child: edge_list){
+            PATH clonedCurrentPath(currentPath);
+            dagDfsUtil(dagGraph, anchor, child, dst, clonedCurrentPath);
+        }
+    }
+
+    static void extractLoopingPaths(GRAPH dagGraph){
+        for(auto &elem: backEdges){
+            EDGE edge = elem.second;
+            PATH curr;
+            dagDfsUtil(dagGraph, edge.second ,edge.second, edge.first, curr);
+        }
+        printLoopExecutionPaths(loopingPaths);
     }
 
     struct BasicBlockExtractionPass : public ModulePass
     {
         static char ID;
         BasicBlockExtractionPass() : ModulePass(ID){};
-
         virtual bool runOnModule(Module &M)
         {
             for (Module::iterator functionIt = M.begin(), endFunctionIt = M.end(); functionIt != endFunctionIt; ++functionIt)
@@ -923,6 +679,7 @@ namespace
                 map<string, AugmentedBasicBlock> idAcfgNode;
                 vector<pair<string, string>> edgeList;
                 string rootBlockId;
+
 
                 if (currentFunction.getBasicBlockList().size() == 0)
                 {
@@ -980,11 +737,6 @@ namespace
                         acfgNode.setRootBlock();
                     }
 
-                    if (isRootBlock)
-                    {
-                        acfgNode.setRootBlock();
-                    }
-
                     for (auto &instruction : basicBlock)
                     {
                         parseInstructionForDDG(const_cast<Instruction &>(instruction));
@@ -1010,28 +762,34 @@ namespace
                     idAcfgNode[acfgNode.getBlockId()] = acfgNode;
                 }
                 // drawDDG("Demo");
-                // printEdgeList(edgeList);
-                extractPaths(edgeList, idAcfgNode, rootBlockId);
-
+                printEdgeList(edgeList);
+                extractCanonicalPaths(edgeList, idAcfgNode, rootBlockId);
+                extractLoopingPaths(dagAdjList);
                 // bool test1 = checkLoadStoreSequenceBetweenNodesinDDG("%17","%20");
                 // bool test2 = checkLoadStoreSequenceBetweenNodesinDDG("%17","%24");
                 // bool test3 = checkLoadStoreSequenceBetweenNodesinDDG("%24", "%28");
 
                 // errs()<<test1<<" "<<test2<<" "<<test3<<"\n";
-                // writeDDGToFile("ddgedges.txt");
+                writeDDGToFile("ddgedges.txt");
             }
             return false;
         }
     };
+
+
+   
 }
 
 char BasicBlockExtractionPass::ID = 0;
+// char LoopInformationExtractionPass::ID = 1;
 
 static RegisterPass<BasicBlockExtractionPass> X("basic-block-extract", "Pass to extract basic blocks from function definitons");
+// static RegisterPass<LoopInformationExtractionPass> Y("loop-info-extract", "Pass to extract to loop information");
 
-static void registerBasicBlockExtractionPass(const PassManagerBuilder &, legacy::PassManagerBase &PM)
+static void registerBasicBlockAndLoopPass(const PassManagerBuilder &, legacy::PassManagerBase &PM)
 {
+    // PM.add(new LoopInformationExtractionPass());
     PM.add(new BasicBlockExtractionPass());
 }
 
-static RegisterStandardPasses RegisterCustomBasicBlockPass(PassManagerBuilder::EP_EarlyAsPossible, registerBasicBlockExtractionPass);
+static RegisterStandardPasses RegisterCustomBasicBlockPass(PassManagerBuilder::EP_EarlyAsPossible, registerBasicBlockAndLoopPass);

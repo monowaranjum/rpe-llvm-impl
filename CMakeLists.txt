@@ -1,6 +1,8 @@
 add_library(BlockExtractPass MODULE
     # List your source files here.
     pass.cpp
+    utility.cpp
+    abb.cpp
 )
 
 # Use C++11 to compile our pass (i.e., supply -std=c++11).
