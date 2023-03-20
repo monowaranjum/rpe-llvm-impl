@@ -10,15 +10,21 @@ namespace
     map<string, int> visited;
     vector<PATH> canonicalPaths;
     map<string, vector<PATH>> loopingPaths;
+    vector<PATH> instantiatedPaths;
+
     map<string, string> typeMap;
     map<string, vector<EDGE>> adjListForDDG;
     map<string, pair<string, int>> relevantFunctions;
+    
     set<string> loopAwareVisited;
+    
     map<string, vector<ProvenanceNode *>> provenanceAdjList;
     map<string, EDGE> backEdges;
+    
     GRAPH canonicalAdjList;
     GRAPH dagAdjList;
-    map<string, string> constantValueFlowMap;
+    
+    map<string, string> constantValueFlowMap; // This is the key to static loop analysis
 
     static void writeDDGToFile(string fileName)
     {
@@ -469,7 +475,7 @@ namespace
         edges.push_back(&start);
         provenanceAdjList["process_name"] = edges;
         int count = 0;
-        for (list<string> path : canonicalPaths)
+        for (PATH path : canonicalPaths)
         {
             errs() << "Path Number : " << ++count << "\n\n";
             // Get each block id and access the function vector from the acfgNodesMap
@@ -666,6 +672,81 @@ namespace
         printLoopExecutionPaths(loopingPaths);
     }
 
+    static vector<PATH> expandPath(PATH p){
+        
+        vector<PATH> expandedPaths;
+        PATH initializer;
+        expandedPaths.push_back(initializer);
+        // errs()<<"Called ExpandPath for: ";
+        // printPath(p);
+        // errs()<<"\n";
+        for(string n:p){
+            if(find(loopingBlocks.begin(), loopingBlocks.end(), n) == loopingBlocks.end()){
+                // Not a looping block.
+                // errs()<<"Not a looping block: "<<n<<"\n";
+                for(PATH &tempPath: expandedPaths){
+                    // errs()<<"Pushing back "<<n<<"\n";
+                    tempPath.push_back(n);
+                    // printPath(tempPath);
+                }
+                // printPaths(expandedPaths);
+            }
+            else if(n!= "LOOP_START" && n!= "LOOP_END"){
+                // errs()<<"Looping Block."<<n<<"\n";
+                for(PATH &tempPath: expandedPaths){
+                    tempPath.push_back("LOOP_START");
+                    tempPath.push_back(n);
+                    // printPath(tempPath);
+                }
+                
+                vector<PATH> candidatePaths = loopingPaths[n];
+                vector<PATH> innerExpandedPaths;
+                for(PATH &cPath: candidatePaths){
+                    PATH temp(cPath);
+                    temp.erase(temp.begin());
+                    if(temp.empty()){
+                        continue;
+                    }
+                    vector<PATH> tempInnerPaths = expandPath(temp);
+                    innerExpandedPaths.insert(innerExpandedPaths.end(), tempInnerPaths.begin(), tempInnerPaths.end()) ;
+                    // append every path in innerexapndedpaths (n) to every path in the current expanded paths (m). 
+                    // So the new expanded paths will have m*n paths
+                }
+                vector<PATH> tempHolder;
+                for(PATH &tempPath: expandedPaths){
+                    for(PATH &x: innerExpandedPaths){
+                        PATH clonedTempPath(tempPath);
+                        clonedTempPath.insert(clonedTempPath.end(), x.begin(), x.end());
+                        tempHolder.push_back(clonedTempPath);
+                    }
+                }
+
+                expandedPaths.clear();
+                for(PATH &x:tempHolder){
+                    expandedPaths.push_back(x);
+                }
+
+                for(PATH &tempPath: expandedPaths){
+                    tempPath.push_back("LOOP_END");
+                }
+            }
+        }
+        return expandedPaths;
+    }
+
+    /**
+     * We take the Canonical Paths here and Expand It Using the looping block paths. 
+     * Then We push the extended path in a stack.
+     * And then Instantiate it by naively executing the loops by sampling them.
+    */
+    static void generatePathsFromCanonicalPaths(){
+        for(PATH p:canonicalPaths){
+            vector<PATH> extractedPaths = expandPath(p);
+            errs()<<"\n\n";
+            printPaths(extractedPaths);
+        }    
+    }
+
     struct BasicBlockExtractionPass : public ModulePass
     {
         static char ID;
@@ -765,19 +846,18 @@ namespace
                 printEdgeList(edgeList);
                 extractCanonicalPaths(edgeList, idAcfgNode, rootBlockId);
                 extractLoopingPaths(dagAdjList);
+                generatePathsFromCanonicalPaths();        
                 // bool test1 = checkLoadStoreSequenceBetweenNodesinDDG("%17","%20");
                 // bool test2 = checkLoadStoreSequenceBetweenNodesinDDG("%17","%24");
                 // bool test3 = checkLoadStoreSequenceBetweenNodesinDDG("%24", "%28");
 
                 // errs()<<test1<<" "<<test2<<" "<<test3<<"\n";
-                writeDDGToFile("ddgedges.txt");
+                // writeDDGToFile("ddgedges.txt");
             }
             return false;
         }
     };
 
-
-   
 }
 
 char BasicBlockExtractionPass::ID = 0;
